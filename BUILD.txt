@@ -1,0 +1,28 @@
+Toonie Remoter - ma nguon Rust (thuan Win32, crate windows-sys 0.52). Logo lay tu Toonie Emulator build 2.
+
+CACH 1 - Build tren Windows:
+  rustup toolchain install 1.77.2      (ban cuoi con ho tro Windows 8 / Server 2012)
+  cargo +1.77.2 build --release
+  File ra: target\release\toonie_remoter.exe
+  (build.rs nhung icon + manifest bang windres neu co mingw; khong co thi bo qua.)
+
+CACH 2 - Cross-compile tu Linux (cach da dung):
+  Rust 1.75 + gcc-mingw-w64-x86-64, target x86_64-pc-windows-gnu, build-std tu rust-src.
+
+Tuy chon dong lenh:  ToonieRemoter.exe --autostart   (tu bam "Bat dau" khi mo)
+File cai dat: ToonieRemoter.ini canh file exe:
+  keydelay=60   do tre sau khi dua tab len truoc (ms)     keyhold=40   thoi gian giu phim (ms)
+  keymode=focus (SendInput, chac chan) | post (PostMessage, khong chuyen cua so nhung Java co the bo qua)
+  capture=1     bat phim ca khi dang go o cua so tab     sleepafter=30  tu ngu sau N giay
+  slot=<auto 0/1>|<duong dan game>   moi dong = 1 tab voi game rieng
+  proxy=<proxy mac dinh cho cac dong chua gan>   (de trong = khong dung proxy)
+  slot=<auto 0/1>|<duong dan game>|<proxy rieng cua dong, co the de trong>
+
+PROXY (moi tab mot proxy rieng):
+  Dinh dang: host:port | host:port:user:pass | socks5://user:pass@host:port | http://user:pass@host:port
+  O "Proxy" = mac dinh cho cac dong chua gan; bam "Gan dong" de gan proxy trong o cho cac dong da tick
+  (khong tick = tat ca; o trong = xoa proxy rieng). Doi proxy co hieu luc khi mo lai tab.
+  Co che: moi tab co 1 relay SOCKS5 cuc bo (127.0.0.1:<cong ngau nhien>, src/relay.rs); Java chay voi
+  -DsocksProxyHost/-DsocksProxyPort tro vao relay, relay tu dang nhap proxy that (SOCKS5 hoac HTTP CONNECT).
+  Ly do khong dung -Djava.net.socks.username/password: JVM bo qua, se gui user he thong va mat khau rong.
+  Ket noi toi localhost/127.x di thang, khong qua proxy. Luu y: user/pass proxy luu dang chu thuong trong .ini.
