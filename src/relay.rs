@@ -383,3 +383,13 @@ pub fn start(up: Upstream) -> io::Result<Relay> {
     });
     Ok(Relay { port, stop })
 }
+
+// Kiem tra proxy: mo ket noi toi host:port qua proxy, tra ve so mili giay hoac thong bao loi.
+pub fn test(up: &Upstream, host: &str, port: u16) -> Result<u128, String> {
+    let t = std::time::Instant::now();
+    match open_remote(up, &Dest::Name(host.to_string()), port) {
+        Ok(_) => Ok(t.elapsed().as_millis()),
+        Err(e) if e.kind() == io::ErrorKind::TimedOut => Err("Hết thời gian chờ".to_string()),
+        Err(e) => Err(e.to_string()),
+    }
+}

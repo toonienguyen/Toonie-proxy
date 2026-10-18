@@ -56,6 +56,49 @@ unsafe fn msgbox(owner: HWND, text: &str, title: &str, flags: u32) -> i32 {
     MessageBoxW(owner, w(text).as_ptr(), w(title).as_ptr(), flags)
 }
 
+// ------------------------------------------------------------------ proxy da luu
+#[derive(Clone)]
+struct ProxyItem {
+    name: String,
+    http: bool, // false = SOCKS5, true = HTTP
+    host: String,
+    port: u16,
+    user: String,
+    pass: String,
+    result: String, // ket qua kiem tra gan nhat (khong luu file)
+}
+
+impl ProxyItem {
+    fn upstream(&self) -> relay::Upstream {
+        relay::Upstream { http: self.http, host: self.host.clone(), port: self.port, user: self.user.clone(), pass: self.pass.clone() }
+    }
+    fn cells(&self) -> Vec<String> {
+        vec![
+            self.name.clone(),
+            (if self.http { "HTTP" } else { "SOCKS5" }).to_string(),
+            self.host.clone(),
+            self.port.to_string(),
+            self.user.clone(),
+            if self.pass.is_empty() { String::new() } else { "****".to_string() },
+            self.result.clone(),
+        ]
+    }
+}
+
+static PROXIES: Mutex<Vec<ProxyItem>> = Mutex::new(Vec::new());
+
+// proxy theo ten (dong/o mac dinh luu TEN proxy); neu khong thay ten thi thu hieu nhu chuoi proxy cu
+fn resolve_proxy(spec: &str) -> Result<Option<relay::Upstream>, String> {
+    let t = spec.trim();
+    if t.is_empty() {
+        return Ok(None);
+    }
+    if let Some(p) = PROXIES.lock().unwrap().iter().find(|p| p.name == t) {
+        return Ok(Some(p.upstream()));
+    }
+    relay::parse(t).map_err(|_| format!("Không tìm thấy proxy \"{}\" (đã bị xóa?)", t))
+}
+
 // ------------------------------------------------------------------ cai dat
 #[derive(Clone)]
 struct Settings {
@@ -72,7 +115,8 @@ struct Settings {
     capture: bool,
     sleep_after: u64,
     separate_id: bool,
-    proxy: String,                    // proxy mac dinh cho cac dong chua gan proxy rieng
+    proxy: String,                    // TEN proxy mac dinh cho cac dong chua gan proxy rieng
+    proxies: Vec<ProxyItem>,          // danh sach proxy da luu (chi dung luc nap file ini)
     slots: Vec<(bool, String, String)>, // (auto, game, proxy) - chi dung luc nap file ini
 }
 
@@ -93,6 +137,7 @@ impl Settings {
             sleep_after: 30,
             separate_id: false,
             proxy: String::new(),
+            proxies: Vec::new(),
             slots: Vec::new(),
         }
     }
@@ -130,6 +175,22 @@ impl Settings {
                         }
                         "separateid" => s.separate_id = v == "1",
                         "proxy" => s.proxy = v.into(),
+                        "px" => {
+                            let f: Vec<&str> = v.split('\t').collect();
+                            if f.len() >= 4 && !f[0].is_empty() && !f[2].is_empty() {
+                                if let Ok(port) = f[3].trim().parse::<u16>() {
+                                    s.proxies.push(ProxyItem {
+                                        name: f[0].to_string(),
+                                        http: f[1] == "http",
+                                        host: f[2].to_string(),
+                                        port,
+                                        user: f.get(4).unwrap_or(&"").to_string(),
+                                        pass: f.get(5).unwrap_or(&"").to_string(),
+                                        result: String::new(),
+                                    });
+                                }
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -152,6 +213,11 @@ impl Settings {
         if let Ok(g) = SLOTS.lock() {
             for sl in g.iter() {
                 txt.push_str(&format!("slot={}|{}|{}\r\n", if sl.auto { 1 } else { 0 }, sl.game, sl.proxy));
+            }
+        }
+        if let Ok(g) = PROXIES.lock() {
+            for p in g.iter() {
+                txt.push_str(&format!("px={}\t{}\t{}\t{}\t{}\t{}\r\n", p.name, if p.http { "http" } else { "socks5" }, p.host, p.port, p.user, p.pass));
             }
         }
         let _ = std::fs::write(Self::path(), txt);
@@ -618,7 +684,7 @@ fn start_tab(java: &Path, s: &Settings, game: &str, slot_proxy: &str, ord: usize
     };
     // proxy: dong co proxy rieng thi dung, khong thi dung proxy mac dinh. Tab tro vao relay cuc bo.
     let spec = if slot_proxy.trim().is_empty() { s.proxy.as_str() } else { slot_proxy };
-    let up = relay::parse(spec).map_err(|e| format!("Proxy không hợp lệ ({}):\n{}", spec, e))?;
+    let up = resolve_proxy(spec).map_err(|e| format!("Proxy không dùng được:\n{}", e))?;
     let (relay, jvm) = match up {
         Some(u) => {
             let r = relay::start(u).map_err(|e| format!("Không mở được relay proxy:\n{}", e))?;
@@ -839,10 +905,16 @@ unsafe fn lv_count(lv: HWND) -> usize {
 
 // Hien proxy cua dong (khong lo mat khau). "-" = dung proxy mac dinh o o Proxy.
 fn proxy_label(spec: &str) -> String {
-    match relay::parse(spec) {
+    let t = spec.trim();
+    if t.is_empty() {
+        return "-".to_string();
+    }
+    if let Some(p) = PROXIES.lock().unwrap().iter().find(|p| p.name == t) {
+        return format!("{} ({}:{})", p.name, p.host, p.port);
+    }
+    match relay::parse(t) {
         Ok(Some(u)) => u.describe(),
-        Ok(None) => "-".to_string(),
-        Err(_) => "(sai định dạng)".to_string(),
+        _ => "(không tìm thấy)".to_string(),
     }
 }
 
@@ -989,6 +1061,8 @@ const ID_HIDE: isize = 130;
 const ID_SHOW: isize = 131;
 const ID_CLOSETABS: isize = 136;
 const ID_SETPROXY: isize = 140;
+const ID_PROXYMGR: isize = 141;
+const ID_PROXYCOMBO: isize = 142;
 
 struct Ctl {
     main: HWND,
@@ -1054,7 +1128,9 @@ unsafe fn create_controls(main: HWND) {
     let java = edit(main, &java_txt, 84, 78, 468);
     button(main, "Duyệt", 560, 75, 66, ID_BROWSE_JAVA);
     label(main, "Proxy:", 14, 114, 66);
-    let proxy = edit(main, &s.proxy, 84, 110, 468);
+    let proxy = child(main, "COMBOBOX", "", WS_TABSTOP | WS_VSCROLL | 0x3 /* CBS_DROPDOWNLIST */, 0, 84, 110, 380, 220, ID_PROXYCOMBO);
+    fill_proxy_combo(proxy, &s.proxy);
+    button(main, "Quản lý…", 472, 107, 80, ID_PROXYMGR);
     button(main, "Gán dòng", 560, 107, 66, ID_SETPROXY);
 
     label(main, "Kích thước tab:", 14, 150, 94);
@@ -1209,10 +1285,7 @@ unsafe fn read_settings(c: &Ctl) -> Result<Settings, String> {
     s.emulator = clean(get_text(c.emu));
     s.game = clean(get_text(c.game));
     s.java = clean(get_text(c.java));
-    s.proxy = clean(get_text(c.proxy));
-    if let Err(e) = relay::parse(&s.proxy) {
-        return Err(format!("Ô Proxy không đúng:\n{}", e));
-    }
+    s.proxy = combo_selected_name(c.proxy);
     s.separate_id = SendMessageW(c.chk, 0x00F0 /* BM_GETCHECK */, 0, 0) == 1;
     if !s.emulator.to_lowercase().ends_with(".jar") || !Path::new(&s.emulator).is_file() {
         return Err("Đường dẫn file Emulator không đúng!".into());
@@ -1508,11 +1581,7 @@ unsafe fn act_remove_rows(c: &Ctl) {
 
 // Gan proxy o o "Proxy" cho cac dong da tick (khong tick dong nao = tat ca). O trong = xoa proxy rieng.
 unsafe fn act_set_proxy(c: &Ctl) {
-    let spec = get_text(c.proxy).trim().trim_matches('"').to_string();
-    if let Err(e) = relay::parse(&spec) {
-        msgbox(c.main, &format!("Proxy không đúng:\n{}", e), "Lỗi", MB_OK | MB_ICONWARNING);
-        return;
-    }
+    let spec = combo_selected_name(c.proxy);
     let idx = targets(c, false);
     let mut running = 0;
     {
@@ -1553,6 +1622,441 @@ unsafe fn change_game(c: &Ctl, row: usize) {
 
 
 
+// ------------------------------------------------------------------ o chon proxy (cua so chinh)
+unsafe fn fill_proxy_combo(cb: HWND, sel: &str) {
+    SendMessageW(cb, 0x014B /* CB_RESETCONTENT */, 0, 0);
+    SendMessageW(cb, 0x0143 /* CB_ADDSTRING */, 0, w("(không dùng proxy)").as_ptr() as LPARAM);
+    let mut idx = 0usize;
+    let items: Vec<(String, bool)> = PROXIES
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|p| (format!("{}   [{} {}:{}]", p.name, if p.http { "http" } else { "socks5" }, p.host, p.port), p.name == sel))
+        .collect();
+    for (i, (t, is_sel)) in items.iter().enumerate() {
+        SendMessageW(cb, 0x0143, 0, w(t).as_ptr() as LPARAM);
+        if *is_sel {
+            idx = i + 1;
+        }
+    }
+    SendMessageW(cb, 0x014E /* CB_SETCURSEL */, idx, 0);
+}
+
+// ten proxy dang chon trong o chon; rong = "(khong dung proxy)"
+unsafe fn combo_selected_name(cb: HWND) -> String {
+    let i = SendMessageW(cb, 0x0147 /* CB_GETCURSEL */, 0, 0);
+    if i <= 0 {
+        return String::new();
+    }
+    PROXIES.lock().unwrap().get(i as usize - 1).map(|p| p.name.clone()).unwrap_or_default()
+}
+
+// ------------------------------------------------------------------ cua so quan ly proxy
+const ID_PM_LIST: isize = 201;
+const ID_PM_NAME: isize = 202;
+const ID_PM_TYPE: isize = 203;
+const ID_PM_HOST: isize = 204;
+const ID_PM_PORT: isize = 205;
+const ID_PM_USER: isize = 206;
+const ID_PM_PASS: isize = 207;
+const ID_PM_INFO: isize = 208;
+const ID_PM_ADD: isize = 210;
+const ID_PM_UPD: isize = 211;
+const ID_PM_DEL: isize = 212;
+const ID_PM_TEST: isize = 213;
+const ID_PM_TESTALL: isize = 214;
+const ID_PM_CLOSE: isize = 215;
+const WM_APP_PXRESULT: u32 = WM_APP + 3;
+const TEST_HOST: &str = "example.com"; // dich de thu: mo ket noi toi day qua proxy
+const TEST_PORT: u16 = 80;
+const PM_COLS: [(&str, i32); 7] = [("Tên", 90), ("Loại", 56), ("IP / Host", 118), ("Port", 46), ("User", 80), ("Pass", 48), ("Kết quả", 170)];
+
+static PMGR: AtomicIsize = AtomicIsize::new(0);
+
+unsafe fn pm_item(h: HWND, id: isize) -> HWND {
+    GetDlgItem(h, id as i32)
+}
+
+unsafe fn pm_text(h: HWND, id: isize) -> String {
+    get_text(pm_item(h, id)).trim().to_string()
+}
+
+// them 1 dong vao ListView khong dung LISTCACHE (cache chi danh cho danh sach tab)
+unsafe fn lv_add(lv: HWND, row: usize, cells: &[String]) {
+    let txt = w(&cells[0]);
+    let mut it: LVITEMW = zeroed();
+    it.mask = 0x1; // LVIF_TEXT
+    it.iItem = row as i32;
+    it.pszText = txt.as_ptr() as *mut u16;
+    SendMessageW(lv, LVM_INSERTITEMW, 0, &it as *const LVITEMW as LPARAM);
+    for (c, t) in cells.iter().enumerate().skip(1) {
+        lv_put(lv, row, c, t);
+    }
+}
+
+unsafe fn pm_select(list: HWND, row: usize) {
+    let mut it: LVITEMW = zeroed();
+    it.stateMask = 0x3; // LVIS_FOCUSED | LVIS_SELECTED
+    it.state = 0x3;
+    SendMessageW(list, 0x102B /* LVM_SETITEMSTATE */, row, &it as *const LVITEMW as LPARAM);
+}
+
+unsafe fn pm_selected(h: HWND) -> Option<usize> {
+    let sel = SendMessageW(pm_item(h, ID_PM_LIST), LVM_GETNEXTITEM, usize::MAX, 0x2 /* LVNI_SELECTED */);
+    if sel >= 0 {
+        Some(sel as usize)
+    } else {
+        None
+    }
+}
+
+fn pm_info_text(name: &str, result: &str) -> String {
+    format!("{}  ->  {}", name, if result.is_empty() { "Chưa kiểm tra" } else { result })
+}
+
+// doc cac o nhap thanh 1 proxy; o IP cho phep dan ca chuoi (host:port, host:port:user:pass, socks5://user:pass@host:port ...)
+unsafe fn pm_read(h: HWND) -> Result<ProxyItem, String> {
+    let mut name = pm_text(h, ID_PM_NAME);
+    let mut host = pm_text(h, ID_PM_HOST);
+    let mut port_s = pm_text(h, ID_PM_PORT);
+    let mut user = pm_text(h, ID_PM_USER);
+    let mut pass = pm_text(h, ID_PM_PASS);
+    let mut http = SendMessageW(pm_item(h, ID_PM_TYPE), 0x0147 /* CB_GETCURSEL */, 0, 0) == 1;
+    if host.contains(':') || host.contains('@') {
+        match relay::parse(&host)? {
+            Some(u) => {
+                if host.contains("://") {
+                    http = u.http;
+                }
+                host = u.host;
+                port_s = u.port.to_string();
+                if !u.user.is_empty() {
+                    user = u.user;
+                    pass = u.pass;
+                }
+            }
+            None => {}
+        }
+    }
+    if host.is_empty() {
+        return Err("Chưa nhập IP / host".into());
+    }
+    let port: u16 = match port_s.parse() {
+        Ok(p) if p > 0 => p,
+        _ => return Err("Port không đúng (1 - 65535)".into()),
+    };
+    if name.is_empty() {
+        name = format!("{}:{}", host, port);
+    }
+    let ctl = |t: &str| t.chars().any(|c| c.is_control());
+    if ctl(&name) || ctl(&host) || ctl(&user) || ctl(&pass) || host.chars().any(|c| c.is_whitespace()) {
+        return Err("Không được dùng ký tự điều khiển, và IP không được có khoảng trắng".into());
+    }
+    if name.contains('|') {
+        return Err("Tên không được chứa dấu |".into());
+    }
+    if user.len() > 255 || pass.len() > 255 {
+        return Err("User / Pass tối đa 255 ký tự".into());
+    }
+    Ok(ProxyItem { name, http, host, port, user, pass, result: String::new() })
+}
+
+unsafe fn pm_fill_form(h: HWND) {
+    let sel = match pm_selected(h) {
+        Some(i) => i,
+        None => return,
+    };
+    let p = match PROXIES.lock().unwrap().get(sel) {
+        Some(p) => p.clone(),
+        None => return,
+    };
+    set_text(pm_item(h, ID_PM_NAME), &p.name);
+    SendMessageW(pm_item(h, ID_PM_TYPE), 0x014E /* CB_SETCURSEL */, p.http as usize, 0);
+    set_text(pm_item(h, ID_PM_HOST), &p.host);
+    set_text(pm_item(h, ID_PM_PORT), &p.port.to_string());
+    set_text(pm_item(h, ID_PM_USER), &p.user);
+    set_text(pm_item(h, ID_PM_PASS), &p.pass);
+    set_text(pm_item(h, ID_PM_INFO), &pm_info_text(&p.name, &p.result));
+}
+
+// sau khi them/sua/xoa: luu file va nap lai o chon proxy o cua so chinh
+unsafe fn pm_after_change() {
+    if let Some(c) = CTL.get() {
+        let keep = CFG.lock().unwrap().proxy.clone();
+        fill_proxy_combo(c.proxy, &keep);
+        CFG.lock().unwrap().proxy = combo_selected_name(c.proxy); // proxy mac dinh bi xoa -> ve "(khong dung proxy)"
+    }
+    persist();
+}
+
+unsafe fn pm_apply_result(h: HWND, name: &str, res: &str) {
+    let idx = {
+        let mut g = PROXIES.lock().unwrap();
+        let pos = g.iter().position(|p| p.name == name);
+        if let Some(i) = pos {
+            g[i].result = res.to_string();
+        }
+        pos
+    };
+    if let Some(i) = idx {
+        lv_put(pm_item(h, ID_PM_LIST), i, 6, res);
+        if pm_selected(h) == Some(i) {
+            set_text(pm_item(h, ID_PM_INFO), &pm_info_text(name, res));
+        }
+    }
+}
+
+unsafe fn pm_start_test(h: HWND, names: Vec<String>) {
+    for name in names {
+        let up = PROXIES.lock().unwrap().iter().find(|p| p.name == name).map(|p| p.upstream());
+        if let Some(up) = up {
+            pm_apply_result(h, &name, "Đang thử...");
+            thread::spawn(move || {
+                let r = match relay::test(&up, TEST_HOST, TEST_PORT) {
+                    Ok(ms) => format!("OK - {} ms", ms),
+                    Err(e) => format!("Lỗi: {}", e),
+                };
+                if let Some(p) = PROXIES.lock().unwrap().iter_mut().find(|p| p.name == name) {
+                    p.result = r.clone();
+                }
+                let hm = PMGR.load(Ordering::Relaxed);
+                if hm != 0 {
+                    let b = Box::into_raw(Box::new((name, r)));
+                    if unsafe { PostMessageW(hm, WM_APP_PXRESULT, 0, b as LPARAM) } == 0 {
+                        drop(unsafe { Box::from_raw(b) });
+                    }
+                }
+            });
+        }
+    }
+}
+
+unsafe fn pm_command(h: HWND, id: isize) {
+    let list = pm_item(h, ID_PM_LIST);
+    let warn = |t: &str| {
+        msgbox(h, t, "Proxy", MB_OK | MB_ICONWARNING);
+    };
+    match id {
+        ID_PM_ADD => match pm_read(h) {
+            Err(e) => {
+                warn(&e);
+            }
+            Ok(p) => {
+                if PROXIES.lock().unwrap().iter().any(|x| x.name == p.name) {
+                    warn("Đã có proxy trùng tên. Hãy đổi tên khác (hoặc chọn dòng đó rồi bấm Sửa).");
+                    return;
+                }
+                let n = {
+                    let mut g = PROXIES.lock().unwrap();
+                    g.push(p.clone());
+                    g.len() - 1
+                };
+                lv_add(list, n, &p.cells());
+                pm_after_change();
+                pm_select(list, n);
+            }
+        },
+        ID_PM_UPD => {
+            let sel = match pm_selected(h) {
+                Some(i) => i,
+                None => {
+                    warn("Hãy chọn một proxy trong danh sách để sửa.");
+                    return;
+                }
+            };
+            match pm_read(h) {
+                Err(e) => {
+                    warn(&e);
+                }
+                Ok(p) => {
+                    let (dup, old) = {
+                        let g = PROXIES.lock().unwrap();
+                        (g.iter().enumerate().any(|(i, x)| i != sel && x.name == p.name), g.get(sel).map(|x| x.name.clone()).unwrap_or_default())
+                    };
+                    if dup {
+                        warn("Đã có proxy khác trùng tên này.");
+                        return;
+                    }
+                    if let Some(slot) = PROXIES.lock().unwrap().get_mut(sel) {
+                        *slot = p.clone();
+                    }
+                    if old != p.name {
+                        // doi ten: cac dong / o mac dinh dang dung ten cu chuyen sang ten moi
+                        for sl in SLOTS.lock().unwrap().iter_mut() {
+                            if sl.proxy == old {
+                                sl.proxy = p.name.clone();
+                            }
+                        }
+                        let mut cfg = CFG.lock().unwrap();
+                        if cfg.proxy == old {
+                            cfg.proxy = p.name.clone();
+                        }
+                    }
+                    for (c, t) in p.cells().iter().enumerate() {
+                        lv_put(list, sel, c, t);
+                    }
+                    set_text(pm_item(h, ID_PM_INFO), &pm_info_text(&p.name, ""));
+                    pm_after_change();
+                }
+            }
+        }
+        ID_PM_DEL => {
+            let sel = match pm_selected(h) {
+                Some(i) => i,
+                None => {
+                    warn("Hãy chọn một proxy trong danh sách để xóa.");
+                    return;
+                }
+            };
+            let name = PROXIES.lock().unwrap().get(sel).map(|x| x.name.clone()).unwrap_or_default();
+            if msgbox(h, &format!("Xóa proxy \"{}\"?\nCác dòng đang dùng proxy này sẽ báo lỗi khi mở tab cho tới khi gán proxy khác.", name), "Xóa proxy", MB_YESNO | MB_ICONQUESTION) != IDYES {
+                return;
+            }
+            {
+                let mut g = PROXIES.lock().unwrap();
+                if sel < g.len() {
+                    g.remove(sel);
+                }
+            }
+            SendMessageW(list, LVM_DELETEITEM, sel, 0);
+            set_text(pm_item(h, ID_PM_INFO), "");
+            pm_after_change();
+        }
+        ID_PM_TEST => match pm_selected(h) {
+            Some(i) => {
+                let name = PROXIES.lock().unwrap().get(i).map(|x| x.name.clone());
+                if let Some(n) = name {
+                    pm_start_test(h, vec![n]);
+                }
+            }
+            None => {
+                warn("Hãy chọn một proxy trong danh sách để kiểm tra.");
+            }
+        },
+        ID_PM_TESTALL => {
+            let names: Vec<String> = PROXIES.lock().unwrap().iter().map(|x| x.name.clone()).collect();
+            pm_start_test(h, names);
+        }
+        ID_PM_CLOSE => {
+            DestroyWindow(h);
+        }
+        _ => {}
+    }
+}
+
+unsafe fn pm_edit(h: HWND, x: i32, y: i32, wd: i32, id: isize) -> HWND {
+    child(h, "EDIT", "", WS_TABSTOP | ES_AUTOHSCROLL as u32, WS_EX_CLIENTEDGE, x, y, wd, 22, id)
+}
+
+unsafe fn pm_create(h: HWND) {
+    let lv = child(h, "SysListView32", "", WS_TABSTOP | 0x1 /* LVS_REPORT */ | 0x4 /* LVS_SINGLESEL */ | 0x8 /* LVS_SHOWSELALWAYS */, WS_EX_CLIENTEDGE, 10, 10, 620, 200, ID_PM_LIST);
+    SendMessageW(lv, LVM_SETEXTENDEDLISTVIEWSTYLE, 0, 0x20 | 0x1); // FULLROWSELECT | GRIDLINES
+    for (i, (name, width)) in PM_COLS.iter().enumerate() {
+        let t = w(name);
+        let mut col: LVCOLUMNW = zeroed();
+        col.mask = 0x1 | 0x2 | 0x4 | 0x8; // FMT | WIDTH | TEXT | SUBITEM
+        col.cx = *width;
+        col.pszText = t.as_ptr() as *mut u16;
+        col.iSubItem = i as i32;
+        SendMessageW(lv, LVM_INSERTCOLUMNW, i, &col as *const LVCOLUMNW as LPARAM);
+    }
+    label(h, "Tên:", 10, 222, 38);
+    pm_edit(h, 50, 218, 130, ID_PM_NAME);
+    label(h, "Loại:", 196, 222, 38);
+    let ty = child(h, "COMBOBOX", "", WS_TABSTOP | WS_VSCROLL | 0x3 /* CBS_DROPDOWNLIST */, 0, 236, 218, 90, 100, ID_PM_TYPE);
+    SendMessageW(ty, 0x0143, 0, w("SOCKS5").as_ptr() as LPARAM);
+    SendMessageW(ty, 0x0143, 0, w("HTTP").as_ptr() as LPARAM);
+    SendMessageW(ty, 0x014E, 0, 0);
+    label(h, "IP:", 340, 222, 24);
+    pm_edit(h, 366, 218, 170, ID_PM_HOST);
+    label(h, "Port:", 548, 222, 32);
+    pm_edit(h, 582, 218, 48, ID_PM_PORT);
+    label(h, "User:", 10, 254, 38);
+    pm_edit(h, 50, 250, 130, ID_PM_USER);
+    label(h, "Pass:", 196, 254, 38);
+    pm_edit(h, 236, 250, 170, ID_PM_PASS);
+    label(h, "Dán cả chuỗi proxy vào ô IP cũng được", 416, 254, 214);
+    button(h, "Thêm", 10, 286, 80, ID_PM_ADD);
+    button(h, "Sửa", 96, 286, 80, ID_PM_UPD);
+    button(h, "Xóa", 182, 286, 80, ID_PM_DEL);
+    button(h, "Kiểm tra", 290, 286, 90, ID_PM_TEST);
+    button(h, "Kiểm tra hết", 386, 286, 110, ID_PM_TESTALL);
+    button(h, "Đóng", 550, 286, 80, ID_PM_CLOSE);
+    child(h, "STATIC", "", 0x1000 /* SS_SUNKEN */, 0, 10, 326, 620, 38, ID_PM_INFO);
+    let items: Vec<ProxyItem> = PROXIES.lock().unwrap().clone();
+    for (i, p) in items.iter().enumerate() {
+        lv_add(lv, i, &p.cells());
+    }
+    if !items.is_empty() {
+        pm_select(lv, 0);
+    }
+}
+
+unsafe extern "system" fn pm_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    match msg {
+        WM_CREATE => {
+            pm_create(hwnd);
+            0
+        }
+        WM_COMMAND => {
+            pm_command(hwnd, (wp & 0xFFFF) as isize);
+            0
+        }
+        WM_NOTIFY => {
+            let nm = &*(lp as *const NMHDR);
+            if nm.hwndFrom == pm_item(hwnd, ID_PM_LIST) && nm.code == 0xFFFF_FF9B /* LVN_ITEMCHANGED */ {
+                pm_fill_form(hwnd);
+            }
+            0
+        }
+        WM_APP_PXRESULT => {
+            let b = Box::from_raw(lp as *mut (String, String));
+            pm_apply_result(hwnd, &b.0, &b.1);
+            0
+        }
+        WM_CLOSE => {
+            DestroyWindow(hwnd);
+            0
+        }
+        WM_DESTROY => {
+            PMGR.store(0, Ordering::Relaxed);
+            0
+        }
+        _ => DefWindowProcW(hwnd, msg, wp, lp),
+    }
+}
+
+unsafe fn open_proxy_mgr(owner: HWND) {
+    let cur = PMGR.load(Ordering::Relaxed);
+    if cur != 0 && IsWindow(cur) != 0 {
+        SetForegroundWindow(cur);
+        return;
+    }
+    let hinst = GetModuleHandleW(null());
+    let cls = w("ToonieProxyMgr");
+    let mut wc: WNDCLASSW = zeroed();
+    wc.lpfnWndProc = Some(pm_proc);
+    wc.hInstance = hinst;
+    wc.hCursor = LoadCursorW(0, IDC_ARROW);
+    wc.hIcon = LoadIconW(hinst, 1 as *const u16);
+    wc.hbrBackground = (COLOR_BTNFACE + 1) as HBRUSH;
+    wc.lpszClassName = cls.as_ptr();
+    RegisterClassW(&wc); // lan mo thu 2 tra ve 0 vi lop da dang ky - khong sao
+    let style = WS_POPUP | WS_CAPTION | WS_SYSMENU;
+    let mut r = RECT { left: 0, top: 0, right: 640, bottom: 374 };
+    AdjustWindowRectEx(&mut r, style, 0, WS_EX_CONTROLPARENT);
+    let (ww, wh) = (r.right - r.left, r.bottom - r.top);
+    let mut orc: RECT = zeroed();
+    GetWindowRect(owner, &mut orc);
+    let hwnd = CreateWindowExW(WS_EX_CONTROLPARENT, cls.as_ptr(), w("Quản lý proxy").as_ptr(), style, orc.left + 30, orc.top + 30, ww, wh, owner, 0, hinst, null());
+    if hwnd != 0 {
+        PMGR.store(hwnd, Ordering::Relaxed);
+        set_icons(hwnd);
+        ShowWindow(hwnd, SW_SHOW);
+        UpdateWindow(hwnd);
+    }
+}
+
 unsafe extern "system" fn main_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     match msg {
         WM_CREATE => {
@@ -1591,6 +2095,12 @@ unsafe extern "system" fn main_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
                     }
                     ID_DELROW => act_remove_rows(c),
                     ID_SETPROXY => act_set_proxy(c),
+                    ID_PROXYMGR => open_proxy_mgr(hwnd),
+                    ID_PROXYCOMBO => {
+                        if (wp >> 16) & 0xFFFF == 1 /* CBN_SELCHANGE */ {
+                            CFG.lock().unwrap().proxy = combo_selected_name(c.proxy);
+                        }
+                    }
                     ID_HIDE => act_hide(c, true),
                     ID_SHOW => act_hide(c, false),
                     ID_CLOSETABS => act_close_tabs(c, false),
@@ -1653,7 +2163,18 @@ unsafe extern "system" fn main_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
 
 fn main() {
     unsafe {
-        let loaded = Settings::load();
+        let mut loaded = Settings::load();
+        // file ini ban truoc luu proxy dang chuoi o khoa proxy= -> doi thanh 1 proxy co ten
+        if !loaded.proxy.is_empty() && !loaded.proxies.iter().any(|p| p.name == loaded.proxy) {
+            if let Ok(Some(u)) = relay::parse(&loaded.proxy) {
+                let name = "Proxy cũ".to_string();
+                loaded.proxies.push(ProxyItem { name: name.clone(), http: u.http, host: u.host, port: u.port, user: u.user, pass: u.pass, result: String::new() });
+                loaded.proxy = name;
+            } else {
+                loaded.proxy.clear();
+            }
+        }
+        *PROXIES.lock().unwrap() = loaded.proxies.clone();
         {
             let mut sl = SLOTS.lock().unwrap();
             for (a, g, px) in &loaded.slots {
@@ -1699,6 +2220,10 @@ fn main() {
 
         let mut msg: MSG = zeroed();
         while GetMessageW(&mut msg, 0, 0, 0) > 0 {
+            let mg = PMGR.load(Ordering::Relaxed);
+            if mg != 0 && IsDialogMessageW(mg, &msg) != 0 {
+                continue;
+            }
             if IsDialogMessageW(main, &msg) != 0 {
                 continue;
             }
