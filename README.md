@@ -16,19 +16,27 @@ Chạy được từ Windows 7 / Server 2008 R2 trở lên.
 
 ## Proxy
 
-Ô **Proxy** là proxy mặc định cho các dòng chưa gán riêng. Nút **Gán dòng** gán proxy đang nhập cho
-các dòng đã tick (không tick dòng nào = tất cả; để ô trống rồi bấm = xóa proxy riêng của dòng).
-Cột **Proxy** trong danh sách hiện proxy của từng dòng (`-` = dùng proxy mặc định).
-Đổi proxy có hiệu lực khi đóng và mở lại tab.
+Proxy được lưu thành danh sách có tên. Bấm **Quản lý…** (cạnh ô Proxy) để mở bảng quản lý:
 
-Các dạng nhập được:
-
-| Dạng | Ví dụ |
+| Ô | Ý nghĩa |
 |---|---|
-| `host:port` (SOCKS5) | `1.2.3.4:1080` |
-| `host:port:user:pass` (SOCKS5) | `1.2.3.4:1080:bob:s3cret` |
-| `socks5://[user:pass@]host:port` | `socks5://bob:s3cret@1.2.3.4:1080` |
-| `http://[user:pass@]host:port` | `http://ann:pw123@1.2.3.4:8080` |
+| Tên | tên để chọn proxy (bỏ trống thì tự đặt `ip:port`) |
+| Loại | SOCKS5 hoặc HTTP |
+| IP, Port | địa chỉ và cổng proxy |
+| User, Pass | tài khoản (bỏ trống nếu proxy không cần) |
+| Kết quả | kết quả kiểm tra gần nhất, ví dụ `OK - 230 ms` hoặc `Lỗi: Proxy từ chối tài khoản/mật khẩu` |
+
+- **Thêm / Sửa / Xóa** thao tác trên dòng đang chọn. Đổi tên proxy thì các dòng đang dùng nó tự đổi theo.
+- **Kiểm tra / Kiểm tra hết** mở kết nối tới `example.com:80` qua proxy và đo thời gian.
+- Dán cả chuỗi vào ô **IP** cũng được: `host:port`, `host:port:user:pass`, `socks5://user:pass@host:port`, `http://user:pass@host:port`. Tool tự tách ra các ô.
+
+Ngoài cửa sổ chính:
+
+- Ô **Proxy** (danh sách chọn) là proxy mặc định cho các dòng chưa gán riêng.
+- **Gán dòng** gán proxy đang chọn cho các dòng đã tick (không tick dòng nào = tất cả). Chọn
+  `(không dùng proxy)` rồi bấm Gán dòng = bỏ proxy riêng của dòng đó.
+- Cột **Proxy** trong danh sách hiện proxy của từng dòng (`-` = dùng proxy mặc định).
+- Đổi proxy có hiệu lực khi đóng và mở lại tab.
 
 ### Cách hoạt động
 
@@ -79,8 +87,9 @@ ToonieRemoter.exe --autostart     tự bấm "Bắt đầu" khi mở
 | `capture` | `1` bật bắt phím cả khi đang gõ ở cửa sổ tab |
 | `sleepafter` | tự ngủ sau N giây không thao tác, tối thiểu 5 |
 | `separateid` | `1` = tách dữ liệu từng tab |
-| `proxy` | proxy mặc định (để trống = không dùng proxy) |
-| `slot=<auto 0/1>\|<đường dẫn game>\|<proxy riêng>` | mỗi dòng là một tab; trường proxy có thể để trống. Dạng cũ `slot=<auto>\|<game>` vẫn đọc được |
+| `proxy` | **tên** proxy mặc định (để trống = không dùng proxy) |
+| `px=tên<TAB>loại<TAB>ip<TAB>port<TAB>user<TAB>pass` | một proxy trong danh sách (loại: `socks5` hoặc `http`) |
+| `slot=<auto 0/1>\|<đường dẫn game>\|<tên proxy riêng>` | mỗi dòng là một tab; trường proxy có thể để trống. Dạng cũ `slot=<auto>\|<game>` vẫn đọc được |
 
 ## Cấu trúc mã nguồn
 
